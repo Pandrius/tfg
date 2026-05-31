@@ -36,6 +36,9 @@ type ElementoArrastre =
   | { tipo: "carpeta"; id: string; nombre: string };
 type MenuElemento = { tipo: "doc" | "carpeta"; id: string; x: number; y: number } | null;
 
+const LONG_PRESS_MS = 450;
+const TOUCH_MOVE_TOLERANCE = 10;
+
 interface Props {
   orgId: string;
   esAdmin: boolean;
@@ -68,6 +71,7 @@ export function ExploradorOrganizacionAdmin({
   const [arrastreTactilActivo, setArrastreTactilActivo] = useState(false);
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrastrandoRef = useRef<ElementoArrastre | null>(null);
+  const toqueInicialRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
   const bloquearClickTrasArrastreRef = useRef(false);
 
   const carpetasActuales = carpetas
@@ -289,6 +293,15 @@ export function ExploradorOrganizacionAdmin({
     }
   };
 
+  const limpiarArrastreTactil = () => {
+    limpiarLongPress();
+    toqueInicialRef.current = null;
+    arrastrandoRef.current = null;
+    setArrastreTactilActivo(false);
+    setArrastrando(null);
+    setCarpetaSobre(null);
+  };
+
   const prepararArrastreTactil = (
     elemento: ElementoArrastre,
     e: React.PointerEvent<HTMLElement>,
@@ -297,14 +310,29 @@ export function ExploradorOrganizacionAdmin({
     const objetivo = e.target as HTMLElement;
     if (objetivo.closest("button, input, select, textarea")) return;
     limpiarLongPress();
+    toqueInicialRef.current = { x: e.clientX, y: e.clientY, pointerId: e.pointerId };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
     longPressRef.current = setTimeout(() => {
       arrastrandoRef.current = elemento;
       setArrastrando(elemento);
       setArrastreTactilActivo(true);
-    }, 420);
+      setMenuElemento(null);
+      navigator.vibrate?.(8);
+    }, LONG_PRESS_MS);
   };
 
   const actualizarArrastreTactil = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.pointerType === "touch" && longPressRef.current && toqueInicialRef.current) {
+      const distancia = Math.hypot(
+        e.clientX - toqueInicialRef.current.x,
+        e.clientY - toqueInicialRef.current.y,
+      );
+      if (distancia > TOUCH_MOVE_TOLERANCE) {
+        limpiarLongPress();
+        toqueInicialRef.current = null;
+      }
+    }
+
     if (!arrastreTactilActivo) return;
     e.preventDefault();
     const destino = document
@@ -315,12 +343,13 @@ export function ExploradorOrganizacionAdmin({
 
   const finalizarArrastreTactil = async (e: React.PointerEvent<HTMLElement>) => {
     limpiarLongPress();
+    toqueInicialRef.current = null;
     if (!arrastreTactilActivo) return;
     e.preventDefault();
     bloquearClickTrasArrastreRef.current = true;
     window.setTimeout(() => {
       bloquearClickTrasArrastreRef.current = false;
-    }, 0);
+    }, 250);
     const destino = document
       .elementFromPoint(e.clientX, e.clientY)
       ?.closest<HTMLElement>("[data-drop-folder-id]");
@@ -396,17 +425,15 @@ export function ExploradorOrganizacionAdmin({
             }
             onPointerMove={actualizarArrastreTactil}
             onPointerUp={(e) => void finalizarArrastreTactil(e)}
-            onPointerCancel={() => {
-              limpiarLongPress();
-              setArrastreTactilActivo(false);
-              arrastrandoRef.current = null;
-              setArrastrando(null);
-              setCarpetaSobre(null);
+            onPointerCancel={limpiarArrastreTactil}
+            onContextMenu={(e) => {
+              if (arrastrando?.id === carpeta.id || arrastreTactilActivo) e.preventDefault();
             }}
+            style={{ touchAction: arrastreTactilActivo ? "none" : "pan-y" }}
             className={[
-              "flex flex-col items-stretch gap-3 px-4 py-4 md:grid md:grid-cols-[28px_44px_1fr_120px_100px_68px] md:items-center md:px-5 md:py-3 md:gap-3.5 border-b border-rule text-[13px] transition-colors",
+              "flex flex-col items-stretch gap-3 px-4 py-4 md:grid md:grid-cols-[28px_44px_1fr_120px_100px_68px] md:items-center md:px-5 md:py-3 md:gap-3.5 border-b border-rule text-[13px] transition-[background-color,opacity,transform] select-none",
               carpetaSobre === carpeta.id ? "bg-accent-tint" : "",
-              arrastrando?.id === carpeta.id ? "opacity-60" : "",
+              arrastrando?.id === carpeta.id ? "opacity-60 scale-[0.98]" : "",
             ].join(" ")}
           >
             <input
@@ -512,16 +539,14 @@ export function ExploradorOrganizacionAdmin({
               }
               onPointerMove={actualizarArrastreTactil}
               onPointerUp={(e) => void finalizarArrastreTactil(e)}
-              onPointerCancel={() => {
-                limpiarLongPress();
-                setArrastreTactilActivo(false);
-                arrastrandoRef.current = null;
-                setArrastrando(null);
-                setCarpetaSobre(null);
+              onPointerCancel={limpiarArrastreTactil}
+              onContextMenu={(e) => {
+                if (arrastrando?.id === doc.id || arrastreTactilActivo) e.preventDefault();
               }}
+              style={{ touchAction: arrastreTactilActivo ? "none" : "pan-y" }}
               className={[
-                "flex flex-col items-stretch gap-3 px-4 py-4 md:grid md:grid-cols-[28px_44px_1fr_120px_100px_68px] md:items-center md:px-5 md:py-3 md:gap-3.5 border-b border-rule last:border-b-0 text-[13px] transition-opacity",
-                arrastrando?.id === doc.id ? "opacity-60" : "",
+                "flex flex-col items-stretch gap-3 px-4 py-4 md:grid md:grid-cols-[28px_44px_1fr_120px_100px_68px] md:items-center md:px-5 md:py-3 md:gap-3.5 border-b border-rule last:border-b-0 text-[13px] transition-[opacity,transform] select-none",
+                arrastrando?.id === doc.id ? "opacity-60 scale-[0.98]" : "",
               ].join(" ")}
             >
               <input

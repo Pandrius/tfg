@@ -79,6 +79,9 @@ type ElementoArrastre =
   | { tipo: "doc"; id: string; nombre: string }
   | { tipo: "carpeta"; id: string; nombre: string };
 
+const LONG_PRESS_MS = 450;
+const TOUCH_MOVE_TOLERANCE = 10;
+
 const ETIQUETAS_FILTRO: { id: Filtro; label: string }[] = [
   { id: "todos", label: "Todos" },
   { id: "privados", label: "Privados" },
@@ -128,6 +131,8 @@ export function ExploradorDocumentos({
   const [arrastreTactilActivo, setArrastreTactilActivo] = useState(false);
   const inputNuevaRef = useRef<HTMLInputElement>(null);
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const arrastrandoRef = useRef<ElementoArrastre | null>(null);
+  const toqueInicialRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
   const bloquearClickTrasArrastreRef = useRef(false);
 
   const carpetasPorId = useMemo(
@@ -365,6 +370,7 @@ export function ExploradorDocumentos({
   };
 
   const iniciarArrastre = (elemento: ElementoArrastre, e: React.DragEvent) => {
+    arrastrandoRef.current = elemento;
     setArrastrando(elemento);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("application/json", JSON.stringify(elemento));
@@ -373,7 +379,8 @@ export function ExploradorDocumentos({
 
   const soltarEnCarpeta = async (carpetaId: string, e?: React.DragEvent) => {
     e?.preventDefault();
-    const elemento = arrastrando;
+    const elemento = arrastrandoRef.current ?? arrastrando;
+    arrastrandoRef.current = null;
     setArrastrando(null);
     setCarpetaSobre(null);
     setArrastreTactilActivo(false);
@@ -388,6 +395,15 @@ export function ExploradorDocumentos({
     }
   };
 
+  const limpiarArrastreTactil = () => {
+    limpiarLongPress();
+    toqueInicialRef.current = null;
+    arrastrandoRef.current = null;
+    setArrastreTactilActivo(false);
+    setArrastrando(null);
+    setCarpetaSobre(null);
+  };
+
   const prepararArrastreTactil = (
     elemento: ElementoArrastre,
     e: React.PointerEvent<HTMLElement>,
@@ -396,13 +412,30 @@ export function ExploradorDocumentos({
     const objetivo = e.target as HTMLElement;
     if (objetivo.closest("button, input, select, textarea")) return;
     limpiarLongPress();
+    toqueInicialRef.current = { x: e.clientX, y: e.clientY, pointerId: e.pointerId };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
     longPressRef.current = setTimeout(() => {
+      arrastrandoRef.current = elemento;
       setArrastrando(elemento);
       setArrastreTactilActivo(true);
-    }, 420);
+      setMenuDoc(null);
+      setMenuCarpeta(null);
+      navigator.vibrate?.(8);
+    }, LONG_PRESS_MS);
   };
 
   const actualizarArrastreTactil = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.pointerType === "touch" && longPressRef.current && toqueInicialRef.current) {
+      const distancia = Math.hypot(
+        e.clientX - toqueInicialRef.current.x,
+        e.clientY - toqueInicialRef.current.y,
+      );
+      if (distancia > TOUCH_MOVE_TOLERANCE) {
+        limpiarLongPress();
+        toqueInicialRef.current = null;
+      }
+    }
+
     if (!arrastreTactilActivo) return;
     e.preventDefault();
     const destino = document
@@ -413,19 +446,21 @@ export function ExploradorDocumentos({
 
   const finalizarArrastreTactil = async (e: React.PointerEvent<HTMLElement>) => {
     limpiarLongPress();
+    toqueInicialRef.current = null;
     if (!arrastreTactilActivo) return;
     e.preventDefault();
     bloquearClickTrasArrastreRef.current = true;
     window.setTimeout(() => {
       bloquearClickTrasArrastreRef.current = false;
-    }, 0);
+    }, 250);
     const destino = document
       .elementFromPoint(e.clientX, e.clientY)
       ?.closest<HTMLElement>("[data-drop-folder-id]");
     const destinoId = destino?.dataset.dropFolderId;
     setArrastreTactilActivo(false);
     setCarpetaSobre(null);
-    const elemento = arrastrando;
+    const elemento = arrastrandoRef.current ?? arrastrando;
+    arrastrandoRef.current = null;
     setArrastrando(null);
     if (elemento && destinoId) {
       await moverElementoDentroDeCarpeta(elemento, destinoId);
@@ -769,6 +804,7 @@ export function ExploradorDocumentos({
               iniciarArrastre({ tipo: "carpeta", id: carpeta.id, nombre: carpeta.nombre }, e)
             }
             onDragEnd={() => {
+              arrastrandoRef.current = null;
               setArrastrando(null);
               setCarpetaSobre(null);
             }}
@@ -784,16 +820,15 @@ export function ExploradorDocumentos({
             }
             onPointerMove={actualizarArrastreTactil}
             onPointerUp={(e) => void finalizarArrastreTactil(e)}
-            onPointerCancel={() => {
-              limpiarLongPress();
-              setArrastreTactilActivo(false);
-              setArrastrando(null);
-              setCarpetaSobre(null);
+            onPointerCancel={limpiarArrastreTactil}
+            onContextMenu={(e) => {
+              if (arrastrando?.id === carpeta.id || arrastreTactilActivo) e.preventDefault();
             }}
+            style={{ touchAction: arrastreTactilActivo ? "none" : "pan-y" }}
             className={[
-              "px-4 py-3 transition-colors",
+              "px-4 py-3 transition-colors select-none",
               carpetaSobre === carpeta.id ? "bg-accent-tint" : "",
-              arrastrando?.id === carpeta.id ? "opacity-60" : "",
+              arrastrando?.id === carpeta.id ? "opacity-60 scale-[0.98]" : "",
             ].join(" ")}
           >
             <div className="flex items-start gap-3">
@@ -891,6 +926,7 @@ export function ExploradorDocumentos({
               draggable
               onDragStart={(e) => iniciarArrastre({ tipo: "doc", id: doc.id, nombre: doc.nombre }, e)}
               onDragEnd={() => {
+                arrastrandoRef.current = null;
                 setArrastrando(null);
                 setCarpetaSobre(null);
               }}
@@ -899,15 +935,14 @@ export function ExploradorDocumentos({
               }
               onPointerMove={actualizarArrastreTactil}
               onPointerUp={(e) => void finalizarArrastreTactil(e)}
-              onPointerCancel={() => {
-                limpiarLongPress();
-                setArrastreTactilActivo(false);
-                setArrastrando(null);
-                setCarpetaSobre(null);
+              onPointerCancel={limpiarArrastreTactil}
+              onContextMenu={(e) => {
+                if (arrastrando?.id === doc.id || arrastreTactilActivo) e.preventDefault();
               }}
+              style={{ touchAction: arrastreTactilActivo ? "none" : "pan-y" }}
               className={[
-                "px-4 py-3 transition-opacity",
-                arrastrando?.id === doc.id ? "opacity-60" : "",
+                "px-4 py-3 transition-[opacity,transform] select-none",
+                arrastrando?.id === doc.id ? "opacity-60 scale-[0.98]" : "",
               ].join(" ")}
             >
               <div className="flex items-start gap-3">
@@ -1072,6 +1107,7 @@ export function ExploradorDocumentos({
                 iniciarArrastre({ tipo: "carpeta", id: carpeta.id, nombre: carpeta.nombre }, e)
               }
               onDragEnd={() => {
+                arrastrandoRef.current = null;
                 setArrastrando(null);
                 setCarpetaSobre(null);
               }}
@@ -1186,6 +1222,7 @@ export function ExploradorDocumentos({
                 draggable
                 onDragStart={(e) => iniciarArrastre({ tipo: "doc", id: doc.id, nombre: doc.nombre }, e)}
                 onDragEnd={() => {
+                  arrastrandoRef.current = null;
                   setArrastrando(null);
                   setCarpetaSobre(null);
                 }}
