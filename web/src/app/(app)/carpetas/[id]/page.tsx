@@ -6,8 +6,13 @@ import { FiabilidadModelo } from "@/components/ui/FiabilidadModelo";
 import { Tag } from "@/components/ui/Tag";
 import { crearClienteAdmin } from "@/lib/supabase/admin";
 import { crearClienteServidor } from "@/lib/supabase/servidor";
+import { FormularioInlineCarpeta } from "../FormularioInlineCarpeta";
 import type { UsuarioInvitable } from "../../documentos/[id]/FormularioInvitacion";
 import { BotonEnviarDocumentoPerfil } from "../../usuarios/[id]/BotonEnviarDocumentoPerfil";
+import {
+  ExploradorOrganizacionAdmin,
+  type DocumentoOrgAdmin,
+} from "../../organizaciones/[id]/ExploradorOrganizacionAdmin";
 
 type Carpeta = {
   id: string;
@@ -61,11 +66,12 @@ export default async function PaginaCarpeta({
   }
 
   let org: { id: string; nombre: string } | null = null;
+  let esAdminOrg = false;
   if (carpeta.org_id) {
     const [{ data: membresia }, { data: orgData }] = await Promise.all([
       admin
         .from("org_miembros")
-        .select("user_id")
+        .select("user_id, rol")
         .eq("org_id", carpeta.org_id)
         .eq("user_id", user.id)
         .maybeSingle(),
@@ -77,6 +83,7 @@ export default async function PaginaCarpeta({
     ]);
 
     if (!membresia) redirect("/organizaciones");
+    esAdminOrg = membresia.rol === "admin";
     org = orgData ?? null;
   }
 
@@ -118,15 +125,29 @@ export default async function PaginaCarpeta({
     .maybeSingle();
   const puedeVerPrivados = !!carpeta.org_id || carpeta.user_id === user.id || !!accesoPorFavorito;
 
-  let documentosQuery = admin
-    .from("Documentos")
-    .select("id, nombre, tipo_archivo, confidencialidad, tamano_bytes, fecha, carpeta_id, probabilidad")
-    .in("carpeta_id", idsDescendientes)
-    .order("fecha", { ascending: false });
-  if (!carpeta.org_id) documentosQuery = documentosQuery.eq("user_id", carpeta.user_id);
-  if (!puedeVerPrivados) documentosQuery = documentosQuery.eq("confidencialidad", 0);
-  const { data: documentosData } = await documentosQuery;
-  const documentos = (documentosData ?? []) as Documento[];
+  let documentos: Documento[] = [];
+  if (carpeta.org_id) {
+    const { data: orgDocs } = await admin
+      .from("org_documentos")
+      .select("carpeta_id, Documentos ( id, nombre, tipo_archivo, confidencialidad, tamano_bytes, fecha, probabilidad )")
+      .eq("org_id", carpeta.org_id)
+      .in("carpeta_id", idsDescendientes);
+    documentos = (orgDocs ?? [])
+      .flatMap((item) => {
+        const doc = Array.isArray(item.Documentos) ? item.Documentos[0] : item.Documentos;
+        return doc ? [{ ...doc, carpeta_id: item.carpeta_id }] : [];
+      }) as Documento[];
+  } else {
+    let documentosQuery = admin
+      .from("Documentos")
+      .select("id, nombre, tipo_archivo, confidencialidad, tamano_bytes, fecha, carpeta_id, probabilidad")
+      .in("carpeta_id", idsDescendientes)
+      .order("fecha", { ascending: false })
+      .eq("user_id", carpeta.user_id);
+    if (!puedeVerPrivados) documentosQuery = documentosQuery.eq("confidencialidad", 0);
+    const { data: documentosData } = await documentosQuery;
+    documentos = (documentosData ?? []) as Documento[];
+  }
 
   const conteosPublicos = contarDocumentosPorCarpeta(carpetas, documentos);
   const subcarpetasVisibles = carpetas
@@ -137,6 +158,15 @@ export default async function PaginaCarpeta({
     )
     .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
   const documentosDirectos = documentos.filter((doc) => doc.carpeta_id === id);
+  const documentosOrgAdmin: DocumentoOrgAdmin[] = documentos.map((doc) => ({
+    id: doc.id,
+    nombre: doc.nombre,
+    tipo_archivo: doc.tipo_archivo,
+    confidencialidad: doc.confidencialidad,
+    probabilidad: doc.probabilidad,
+    tamano_bytes: doc.tamano_bytes,
+    carpeta_id: doc.carpeta_id,
+  }));
   const totalVisibles = documentos.length;
   const propietario = perfil?.nombre_completo || perfil?.nombre_usuario || "usuario";
   const { data: perfilesDisponibles } = await admin
@@ -175,12 +205,29 @@ export default async function PaginaCarpeta({
         </div>
 
         {totalVisibles > 0 && (
-          <a href={`/api/carpetas/${id}/descargar`} className="w-full sm:w-auto">
-            <Button variant="primary" size="md" className="w-full justify-center sm:w-auto">Descargar carpeta</Button>
-          </a>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            {carpeta.org_id && (
+              <FormularioInlineCarpeta orgId={carpeta.org_id} parentId={id} />
+            )}
+            <a href={`/api/carpetas/${id}/descargar`} className="w-full sm:w-auto">
+              <Button variant="primary" size="md" className="w-full justify-center sm:w-auto">Descargar carpeta</Button>
+            </a>
+          </div>
+        )}
+        {totalVisibles === 0 && carpeta.org_id && (
+          <FormularioInlineCarpeta orgId={carpeta.org_id} parentId={id} />
         )}
       </header>
 
+      {carpeta.org_id ? (
+        <ExploradorOrganizacionAdmin
+          orgId={carpeta.org_id}
+          esAdmin={esAdminOrg}
+          carpetas={carpetas}
+          documentos={documentosOrgAdmin}
+          carpetaActualId={id}
+        />
+      ) : (
       <div className="rounded-[14px] border border-rule bg-paper overflow-hidden">
         <div className="hidden sm:grid grid-cols-[44px_1fr_120px_110px_110px_150px] items-center px-5 py-2.5 gap-3 bg-soft text-mute font-display italic text-xs border-b border-rule">
           <div></div>
@@ -263,6 +310,7 @@ export default async function PaginaCarpeta({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

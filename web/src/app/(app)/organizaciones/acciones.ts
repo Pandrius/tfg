@@ -234,6 +234,12 @@ export async function expulsarMiembro(orgId: string, userId: string): Promise<vo
 
   if (membresia?.rol !== "admin") return;
 
+  const { data: org } = await admin
+    .from("organizaciones")
+    .select("nombre")
+    .eq("id", orgId)
+    .maybeSingle();
+
   const { error } = await admin
     .from("org_miembros")
     .delete()
@@ -245,7 +251,15 @@ export async function expulsarMiembro(orgId: string, userId: string): Promise<vo
     return;
   }
 
+  await admin.from("org_notificaciones").insert({
+    user_id: userId,
+    org_id: orgId,
+    tipo: "expulsion",
+    mensaje: `Has sido expulsado de la organizacion ${org?.nombre ?? ""}.`.trim(),
+  });
+
   revalidatePath("/organizaciones");
+  revalidatePath("/buzon");
   revalidatePath(`/organizaciones/${orgId}`);
   redirect(`/organizaciones/${orgId}`);
 }
@@ -415,6 +429,7 @@ export async function vincularDocumento(
 
   if (membresia?.rol !== "admin") return;
   if (!doc) return;
+  if (await documentoNombreExisteEnOrganizacion(admin, orgId, documentoId)) return;
 
   const cabe = await documentoCabeEnOrganizacion(
     admin,
@@ -427,7 +442,7 @@ export async function vincularDocumento(
   const { error } = await admin
     .from("org_documentos")
     .upsert(
-      { org_id: orgId, documento_id: documentoId },
+      { org_id: orgId, documento_id: documentoId, carpeta_id: null },
       { onConflict: "org_id,documento_id" },
     );
 
@@ -474,6 +489,9 @@ export async function subirDocumentoAOrganizacion(
 
   if (!membresia) return { error: "No perteneces a esa organizacion." };
   if (!doc || doc.user_id !== user.id) return { error: "Documento no encontrado." };
+  if (await documentoNombreExisteEnOrganizacion(admin, orgId, documentoId)) {
+    return { error: "Ya hay un documento con ese nombre en la organizacion." };
+  }
 
   const cabe = await documentoCabeEnOrganizacion(
     admin,
@@ -496,7 +514,7 @@ export async function subirDocumentoAOrganizacion(
   }
 
   const { error: errorVinculo } = await admin.from("org_documentos").upsert(
-    { org_id: orgId, documento_id: documentoId },
+    { org_id: orgId, documento_id: documentoId, carpeta_id: carpetaId },
     { onConflict: "org_id,documento_id" },
   );
   if (errorVinculo) {
@@ -504,21 +522,154 @@ export async function subirDocumentoAOrganizacion(
     return { error: "Error al subir el documento a la organizacion." };
   }
 
-  const { error: errorCarpeta } = await admin
-    .from("Documentos")
-    .update({ carpeta_id: carpetaId })
-    .eq("id", documentoId)
-    .eq("user_id", user.id);
-  if (errorCarpeta) {
-    console.error("Error moving document to org folder:", errorCarpeta);
-    return { error: "Documento vinculado, pero no se pudo asignar carpeta." };
-  }
-
   revalidatePath("/mis-documentos");
   revalidatePath("/organizaciones");
   revalidatePath(`/organizaciones/${orgId}`);
   if (carpetaId) revalidatePath(`/carpetas/${carpetaId}`);
   return { ok: "Documento subido a la organizacion." };
+}
+
+export async function subirCarpetaAOrganizacion(
+  _previo: { error: string } | { ok: string } | undefined,
+  datos: FormData,
+): Promise<{ error: string } | { ok: string } | undefined> {
+  const orgId = String(datos.get("org_id") ?? "").trim();
+  const carpetaId = String(datos.get("carpeta_id") ?? "").trim();
+  const carpetaDestinoRaw = String(datos.get("carpeta_destino_id") ?? "").trim();
+  const carpetaDestinoId = carpetaDestinoRaw || null;
+  if (!orgId || !carpetaId) return { error: "Datos incompletos." };
+
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const admin = crearClienteAdmin();
+  const [{ data: membresia }, { data: carpetaRaiz }] = await Promise.all([
+    admin
+      .from("org_miembros")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("user_id", user.id)
+      .maybeSingle(),
+    admin
+      .from("carpetas")
+      .select("id, nombre, parent_id, org_id, user_id")
+      .eq("id", carpetaId)
+      .maybeSingle(),
+  ]);
+
+  if (!membresia) return { error: "No perteneces a esa organizacion." };
+  if (!carpetaRaiz || carpetaRaiz.user_id !== user.id || carpetaRaiz.org_id !== null) {
+    return { error: "Carpeta no encontrada." };
+  }
+
+  if (carpetaDestinoId) {
+    const { data: carpetaDestino } = await admin
+      .from("carpetas")
+      .select("id")
+      .eq("id", carpetaDestinoId)
+      .eq("org_id", orgId)
+      .maybeSingle();
+    if (!carpetaDestino) return { error: "Carpeta de organizacion no valida." };
+  }
+
+  const { data: carpetasUsuario } = await admin
+    .from("carpetas")
+    .select("id, nombre, parent_id")
+    .eq("user_id", user.id)
+    .is("org_id", null);
+
+  const carpetasIncluidas = obtenerSubarbolCarpetas(carpetasUsuario ?? [], carpetaId);
+  if (carpetasIncluidas.length === 0) return { error: "Carpeta no encontrada." };
+
+  const idsCarpetas = carpetasIncluidas.map((carpeta) => carpeta.id);
+  const { data: docs } = await admin
+    .from("Documentos")
+    .select("id, nombre, tamano_bytes, carpeta_id")
+    .eq("user_id", user.id)
+    .in("carpeta_id", idsCarpetas);
+
+  const documentos = docs ?? [];
+  if (documentos.length === 0) return { error: "La carpeta no contiene documentos." };
+
+  const { data: orgDocs } = await admin
+    .from("org_documentos")
+    .select("documento_id, Documentos ( id, nombre, tamano_bytes )")
+    .eq("org_id", orgId);
+
+  const nombresExistentes = new Map<string, string>();
+  const idsYaVinculados = new Set<string>();
+  let usadoBytes = 0;
+  for (const item of orgDocs ?? []) {
+    const doc = Array.isArray(item.Documentos) ? item.Documentos[0] : item.Documentos;
+    if (!doc?.id) continue;
+    idsYaVinculados.add(doc.id);
+    nombresExistentes.set(String(doc.nombre).toLowerCase(), doc.id);
+    usadoBytes += Number(doc.tamano_bytes ?? 0);
+  }
+
+  for (const doc of documentos) {
+    const idExistente = nombresExistentes.get(String(doc.nombre).toLowerCase());
+    if (idExistente && idExistente !== doc.id) {
+      return { error: `Ya hay un documento llamado "${doc.nombre}" en la organizacion.` };
+    }
+  }
+
+  const bytesNuevos = documentos.reduce((acc, doc) => {
+    if (idsYaVinculados.has(doc.id)) return acc;
+    return acc + Number(doc.tamano_bytes ?? 0);
+  }, 0);
+  if (usadoBytes + bytesNuevos > LIMITE_ORG_BYTES) {
+    return { error: "La organizacion no tiene espacio suficiente para esa carpeta." };
+  }
+
+  const mapaCarpetasOrg = new Map<string, string>();
+  const carpetasOrdenadas = ordenarCarpetasPorJerarquia(carpetasIncluidas, carpetaId);
+
+  for (const carpeta of carpetasOrdenadas) {
+    const parentId =
+      carpeta.id === carpetaId
+        ? carpetaDestinoId
+        : mapaCarpetasOrg.get(carpeta.parent_id ?? "") ?? carpetaDestinoId;
+    const { data: creada, error } = await admin
+      .from("carpetas")
+      .insert({
+        nombre: carpeta.nombre,
+        user_id: user.id,
+        org_id: orgId,
+        parent_id: parentId,
+      })
+      .select("id")
+      .single();
+
+    if (error || !creada) {
+      console.error("Error creating org folder copy:", error);
+      return { error: "Error al crear la carpeta en la organizacion." };
+    }
+    mapaCarpetasOrg.set(carpeta.id, creada.id);
+  }
+
+  const vinculos = documentos.map((doc) => ({
+    org_id: orgId,
+    documento_id: doc.id,
+    carpeta_id: mapaCarpetasOrg.get(doc.carpeta_id ?? "") ?? null,
+  }));
+
+  const { error: errorVinculos } = await admin
+    .from("org_documentos")
+    .upsert(vinculos, { onConflict: "org_id,documento_id" });
+
+  if (errorVinculos) {
+    console.error("Error linking folder documents to org:", errorVinculos);
+    return { error: "Error al subir la carpeta a la organizacion." };
+  }
+
+  revalidatePath("/mis-documentos");
+  revalidatePath("/organizaciones");
+  revalidatePath(`/organizaciones/${orgId}`);
+  return { ok: "Carpeta subida a la organizacion." };
 }
 
 export async function desvincularDocumento(
@@ -557,6 +708,276 @@ export async function desvincularDocumento(
   redirect(`/organizaciones/${orgId}`);
 }
 
+export async function eliminarDocumentoOrganizacion(
+  orgId: string,
+  documentoId: string,
+): Promise<void> {
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+
+  const admin = crearClienteAdmin();
+  const [{ data: membresia }, { data: doc }] = await Promise.all([
+    admin
+      .from("org_miembros")
+      .select("rol")
+      .eq("org_id", orgId)
+      .eq("user_id", user.id)
+      .single(),
+    admin
+      .from("Documentos")
+      .select("id, url")
+      .eq("id", documentoId)
+      .single(),
+  ]);
+
+  if (membresia?.rol !== "admin" || !doc) return;
+
+  const { error: errorDb } = await admin
+    .from("Documentos")
+    .delete()
+    .eq("id", documentoId);
+
+  if (errorDb) {
+    console.error("Error deleting org document:", errorDb);
+    return;
+  }
+
+  if (doc.url) {
+    await admin.storage.from("almacen_documentos").remove([doc.url]);
+  }
+
+  revalidatePath("/organizaciones");
+  revalidatePath(`/organizaciones/${orgId}`);
+  redirect(`/organizaciones/${orgId}`);
+}
+
+export async function moverElementosOrganizacion(
+  _previo: { error: string } | { ok: string } | undefined,
+  datos: FormData,
+): Promise<{ error: string } | { ok: string } | undefined> {
+  const orgId = String(datos.get("org_id") ?? "").trim();
+  const destinoRaw = String(datos.get("carpeta_id") ?? "").trim();
+  const destinoId = destinoRaw || null;
+  const docIds = obtenerIdsFormData(datos, "doc_ids");
+  const carpetaIds = obtenerIdsFormData(datos, "carpeta_ids");
+  if (!orgId || docIds.length + carpetaIds.length === 0) return { error: "Seleccion incompleta." };
+
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const admin = crearClienteAdmin();
+  const esMiembro = await usuarioEsMiembroOrganizacion(admin, orgId, user.id);
+  if (!esMiembro) return { error: "No autorizado." };
+
+  const { data: carpetasOrg } = await admin
+    .from("carpetas")
+    .select("id, parent_id")
+    .eq("org_id", orgId);
+  const carpetas = carpetasOrg ?? [];
+  const idsCarpetasOrg = new Set(carpetas.map((carpeta) => carpeta.id));
+
+  if (destinoId && !idsCarpetasOrg.has(destinoId)) return { error: "Carpeta destino no valida." };
+  if (carpetaIds.some((id) => !idsCarpetasOrg.has(id))) return { error: "Carpeta no valida." };
+  for (const carpetaId of carpetaIds) {
+    if (destinoId && (destinoId === carpetaId || esDescendienteCarpeta(carpetas, destinoId, carpetaId))) {
+      return { error: "No puedes mover una carpeta dentro de si misma." };
+    }
+  }
+
+  if (docIds.length > 0) {
+    const { data: vinculos } = await admin
+      .from("org_documentos")
+      .select("documento_id")
+      .eq("org_id", orgId)
+      .in("documento_id", docIds);
+    if ((vinculos ?? []).length !== docIds.length) return { error: "Documento no valido." };
+
+    const { error } = await admin
+      .from("org_documentos")
+      .update({ carpeta_id: destinoId })
+      .eq("org_id", orgId)
+      .in("documento_id", docIds);
+    if (error) return { error: error.message };
+  }
+
+  if (carpetaIds.length > 0) {
+    const { error } = await admin
+      .from("carpetas")
+      .update({ parent_id: destinoId })
+      .eq("org_id", orgId)
+      .in("id", carpetaIds);
+    if (error) return { error: error.message };
+  }
+
+  revalidatePath("/organizaciones");
+  revalidatePath(`/organizaciones/${orgId}`);
+  return { ok: "Elementos movidos." };
+}
+
+export async function renombrarElementoOrganizacion(
+  _previo: { error: string } | { ok: string } | undefined,
+  datos: FormData,
+): Promise<{ error: string } | { ok: string } | undefined> {
+  const orgId = String(datos.get("org_id") ?? "").trim();
+  const tipo = String(datos.get("tipo") ?? "").trim();
+  const id = String(datos.get("id") ?? "").trim();
+  const nombre = String(datos.get("nombre") ?? "").trim();
+  if (!orgId || !id || !nombre) return { error: "Datos incompletos." };
+  if (nombre.length > 200) return { error: "Nombre demasiado largo." };
+  if (tipo !== "doc" && tipo !== "carpeta") return { error: "Tipo no valido." };
+
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const admin = crearClienteAdmin();
+  const esMiembro = await usuarioEsMiembroOrganizacion(admin, orgId, user.id);
+  if (!esMiembro) return { error: "No autorizado." };
+
+  if (tipo === "carpeta") {
+    const { data: carpeta } = await admin
+      .from("carpetas")
+      .select("id")
+      .eq("id", id)
+      .eq("org_id", orgId)
+      .maybeSingle();
+    if (!carpeta) return { error: "Carpeta no valida." };
+
+    const { error } = await admin
+      .from("carpetas")
+      .update({ nombre })
+      .eq("id", id)
+      .eq("org_id", orgId);
+    if (error) return { error: error.message };
+  } else {
+    const { data: vinculo } = await admin
+      .from("org_documentos")
+      .select("documento_id")
+      .eq("org_id", orgId)
+      .eq("documento_id", id)
+      .maybeSingle();
+    if (!vinculo) return { error: "Documento no valido." };
+
+    const { error } = await admin
+      .from("Documentos")
+      .update({ nombre })
+      .eq("id", id);
+    if (error) return { error: error.message };
+  }
+
+  revalidatePath("/organizaciones");
+  revalidatePath(`/organizaciones/${orgId}`);
+  return { ok: "Nombre actualizado." };
+}
+
+export async function eliminarElementosOrganizacion(
+  _previo: { error: string } | { ok: string } | undefined,
+  datos: FormData,
+): Promise<{ error: string } | { ok: string } | undefined> {
+  const orgId = String(datos.get("org_id") ?? "").trim();
+  const docIds = obtenerIdsFormData(datos, "doc_ids");
+  const carpetaIds = obtenerIdsFormData(datos, "carpeta_ids");
+  if (!orgId || docIds.length + carpetaIds.length === 0) return { error: "Seleccion incompleta." };
+
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const admin = crearClienteAdmin();
+  const esAdmin = await usuarioEsAdminOrganizacion(admin, orgId, user.id);
+  if (!esAdmin) return { error: "No autorizado." };
+
+  const { data: carpetasOrg } = await admin
+    .from("carpetas")
+    .select("id, parent_id")
+    .eq("org_id", orgId);
+  const carpetas = carpetasOrg ?? [];
+  const idsCarpetasOrg = new Set(carpetas.map((carpeta) => carpeta.id));
+  if (carpetaIds.some((id) => !idsCarpetasOrg.has(id))) return { error: "Carpeta no valida." };
+
+  const carpetasRaiz = filtrarRaicesSeleccionadas(carpetas, carpetaIds);
+  const carpetasAEliminar = carpetasRaiz.flatMap((id) => obtenerSubarbolCarpetas(carpetas, id));
+  const idsCarpetasAEliminar = [...new Set(carpetasAEliminar.map((carpeta) => carpeta.id))];
+
+  const idsDocsAEliminar = new Set(docIds);
+  if (idsCarpetasAEliminar.length > 0) {
+    const { data: docsEnCarpetas } = await admin
+      .from("org_documentos")
+      .select("documento_id")
+      .eq("org_id", orgId)
+      .in("carpeta_id", idsCarpetasAEliminar);
+    for (const item of docsEnCarpetas ?? []) idsDocsAEliminar.add(item.documento_id);
+  }
+
+  if (idsDocsAEliminar.size > 0) {
+    const ids = [...idsDocsAEliminar];
+    const { data: vinculos } = await admin
+      .from("org_documentos")
+      .select("documento_id")
+      .eq("org_id", orgId)
+      .in("documento_id", ids);
+    if ((vinculos ?? []).length !== ids.length) return { error: "Documento no valido." };
+
+    const { data: docs } = await admin
+      .from("Documentos")
+      .select("id, url")
+      .in("id", ids);
+    const rutas = (docs ?? [])
+      .map((doc) => doc.url)
+      .filter((url): url is string => typeof url === "string" && url.length > 0);
+    if (rutas.length > 0) await admin.storage.from("almacen_documentos").remove(rutas);
+
+    const { error } = await admin
+      .from("Documentos")
+      .delete()
+      .in("id", ids);
+    if (error) return { error: error.message };
+  }
+
+  const carpetasOrdenadas = carpetasAEliminar.sort(
+    (a, b) => profundidadCarpeta(carpetas, b.id) - profundidadCarpeta(carpetas, a.id),
+  );
+  for (const carpeta of carpetasOrdenadas) {
+    const { error } = await admin
+      .from("carpetas")
+      .delete()
+      .eq("org_id", orgId)
+      .eq("id", carpeta.id);
+    if (error) return { error: error.message };
+  }
+
+  revalidatePath("/organizaciones");
+  revalidatePath(`/organizaciones/${orgId}`);
+  return { ok: "Elementos eliminados." };
+}
+
+export async function marcarNotificacionOrgLeida(notificacionId: string): Promise<void> {
+  const supabase = await crearClienteServidor();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const admin = crearClienteAdmin();
+  await admin
+    .from("org_notificaciones")
+    .update({ leida: true })
+    .eq("id", notificacionId)
+    .eq("user_id", user.id);
+
+  revalidatePath("/buzon");
+}
+
 async function usuarioEsAdminDeOtraOrganizacion(
   admin: ReturnType<typeof crearClienteAdmin>,
   userId: string,
@@ -573,6 +994,34 @@ async function usuarioEsAdminDeOtraOrganizacion(
 
   const { data } = await query;
   return (data?.length ?? 0) > 0;
+}
+
+async function usuarioEsAdminOrganizacion(
+  admin: ReturnType<typeof crearClienteAdmin>,
+  orgId: string,
+  userId: string,
+) {
+  const { data } = await admin
+    .from("org_miembros")
+    .select("rol")
+    .eq("org_id", orgId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return data?.rol === "admin";
+}
+
+async function usuarioEsMiembroOrganizacion(
+  admin: ReturnType<typeof crearClienteAdmin>,
+  orgId: string,
+  userId: string,
+) {
+  const { data } = await admin
+    .from("org_miembros")
+    .select("user_id")
+    .eq("org_id", orgId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return Boolean(data);
 }
 
 function esTablaInvitacionesNoDisponible(error: { code?: string; message?: string }) {
@@ -616,4 +1065,130 @@ async function documentoCabeEnOrganizacion(
   }, 0);
 
   return usado + tamanoDocumentoBytes <= LIMITE_ORG_BYTES;
+}
+
+async function documentoNombreExisteEnOrganizacion(
+  admin: ReturnType<typeof crearClienteAdmin>,
+  orgId: string,
+  documentoId: string,
+) {
+  const { data: doc } = await admin
+    .from("Documentos")
+    .select("id, nombre")
+    .eq("id", documentoId)
+    .maybeSingle();
+  if (!doc) return true;
+
+  const { data: orgDocs } = await admin
+    .from("org_documentos")
+    .select("documento_id, Documentos ( id, nombre )")
+    .eq("org_id", orgId);
+
+  const nombre = String(doc.nombre).toLowerCase();
+  return (orgDocs ?? []).some((item) => {
+    if (item.documento_id === documentoId) return false;
+    const existente = Array.isArray(item.Documentos) ? item.Documentos[0] : item.Documentos;
+    return String(existente?.nombre ?? "").toLowerCase() === nombre;
+  });
+}
+
+type CarpetaBasica = {
+  id: string;
+  nombre?: string;
+  parent_id: string | null;
+};
+
+function obtenerSubarbolCarpetas(carpetas: CarpetaBasica[], raizId: string) {
+  const resultado: CarpetaBasica[] = [];
+  const pendientes = [raizId];
+  const porPadre = new Map<string | null, CarpetaBasica[]>();
+  for (const carpeta of carpetas) {
+    const hermanas = porPadre.get(carpeta.parent_id) ?? [];
+    hermanas.push(carpeta);
+    porPadre.set(carpeta.parent_id, hermanas);
+  }
+
+  while (pendientes.length > 0) {
+    const id = pendientes.shift()!;
+    const carpeta = carpetas.find((item) => item.id === id);
+    if (!carpeta) continue;
+    resultado.push(carpeta);
+    pendientes.push(...(porPadre.get(id) ?? []).map((item) => item.id));
+  }
+
+  return resultado;
+}
+
+function obtenerIdsFormData(datos: FormData, campo: string) {
+  const crudo = datos.getAll(campo).flatMap((item) => {
+    const valor = String(item ?? "").trim();
+    if (!valor) return [];
+    try {
+      const parseado = JSON.parse(valor) as unknown;
+      if (Array.isArray(parseado)) {
+        return parseado.filter((id): id is string => typeof id === "string" && id.length > 0);
+      }
+    } catch {
+      return [valor];
+    }
+    return [valor];
+  });
+
+  return [...new Set(crudo)];
+}
+
+function filtrarRaicesSeleccionadas(carpetas: CarpetaBasica[], ids: string[]) {
+  const seleccion = new Set(ids);
+  return ids.filter((id) => {
+    let actual = carpetas.find((carpeta) => carpeta.id === id);
+    while (actual?.parent_id) {
+      if (seleccion.has(actual.parent_id)) return false;
+      actual = carpetas.find((carpeta) => carpeta.id === actual?.parent_id);
+    }
+    return true;
+  });
+}
+
+function profundidadCarpeta(carpetas: CarpetaBasica[], id: string) {
+  let profundidad = 0;
+  let actual = carpetas.find((carpeta) => carpeta.id === id);
+  while (actual?.parent_id) {
+    profundidad++;
+    actual = carpetas.find((carpeta) => carpeta.id === actual?.parent_id);
+  }
+  return profundidad;
+}
+
+function esDescendienteCarpeta(
+  carpetas: CarpetaBasica[],
+  posibleDescendienteId: string,
+  posiblePadreId: string,
+) {
+  let actual = carpetas.find((carpeta) => carpeta.id === posibleDescendienteId);
+  while (actual?.parent_id) {
+    if (actual.parent_id === posiblePadreId) return true;
+    actual = carpetas.find((carpeta) => carpeta.id === actual?.parent_id);
+  }
+  return false;
+}
+
+function ordenarCarpetasPorJerarquia(carpetas: CarpetaBasica[], raizId: string) {
+  const porId = new Map(carpetas.map((carpeta) => [carpeta.id, carpeta]));
+  const porPadre = new Map<string | null, CarpetaBasica[]>();
+  for (const carpeta of carpetas) {
+    const hermanas = porPadre.get(carpeta.parent_id) ?? [];
+    hermanas.push(carpeta);
+    porPadre.set(carpeta.parent_id, hermanas);
+  }
+
+  const resultado: CarpetaBasica[] = [];
+  const visitar = (id: string) => {
+    const carpeta = porId.get(id);
+    if (!carpeta) return;
+    resultado.push(carpeta);
+    for (const hija of porPadre.get(id) ?? []) visitar(hija.id);
+  };
+
+  visitar(raizId);
+  return resultado;
 }

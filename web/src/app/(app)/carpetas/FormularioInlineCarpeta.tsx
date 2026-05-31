@@ -6,7 +6,13 @@ import { Input } from "@/components/ui/Input";
 import { useToast } from "@/components/ui/Toast";
 import { crearCarpeta } from "./acciones";
 
-export function FormularioInlineCarpeta({ orgId }: { orgId?: string }) {
+export function FormularioInlineCarpeta({
+  orgId,
+  parentId,
+}: {
+  orgId?: string;
+  parentId?: string;
+}) {
   const [abierto, setAbierto] = useState(false);
   const [nombre, setNombre] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -20,13 +26,14 @@ export function FormularioInlineCarpeta({ orgId }: { orgId?: string }) {
     const fd = new FormData();
     fd.append("nombre", nombre.trim());
     if (orgId) fd.append("org_id", orgId);
+    if (parentId) fd.append("parent_id", parentId);
     const res = await crearCarpeta(undefined, fd);
     setEnviando(false);
     if (res && "ok" in res) {
       mostrar({ variant: "ok", titulo: res.ok });
       setNombre("");
       setAbierto(false);
-      if (orgId) {
+      if (orgId || parentId) {
         router.refresh();
       } else {
         router.replace("/carpetas");
