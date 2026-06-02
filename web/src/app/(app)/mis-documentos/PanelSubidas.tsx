@@ -50,6 +50,10 @@ const MAX_POR_TANDA = 10;
 const CONCURRENCIA = 3;
 const TIEMPO_FADE_LISTO = 5000;
 
+interface Props {
+  carpetaActualId?: string | null;
+}
+
 interface ArchivoEnCola {
   id: string;
   fichero: File;
@@ -65,7 +69,7 @@ interface ArchivoEnCola {
  * Panel que orquesta una cola de subidas multi-archivo con concurrencia 3.
  * Cada archivo abre su propia conexión SSE a /api/subir.
  */
-export function PanelSubidas() {
+export function PanelSubidas({ carpetaActualId = null }: Props) {
   const router = useRouter();
   const { mostrar } = useToast();
   const [archivos, setArchivos] = useState<ArchivoEnCola[]>([]);
@@ -74,6 +78,7 @@ export function PanelSubidas() {
   /** Cola imperativa para evitar dobles despachos por reejecuciones de React en dev. */
   const pendientes = useRef<string[]>([]);
   const ficheros = useRef(new Map<string, File>());
+  const inputCarpetaRef = useRef<HTMLInputElement>(null);
   const subirArchivoRef = useRef<(id: string, fichero: File) => void>(() => {});
 
   /** Despacha tantos archivos de la cola como permita la concurrencia. */
@@ -192,6 +197,9 @@ export function PanelSubidas() {
 
       const body = new FormData();
       body.append("archivo", fichero);
+      const rutaRelativa = obtenerRutaRelativa(fichero);
+      if (rutaRelativa) body.append("relative_path", rutaRelativa);
+      if (carpetaActualId) body.append("carpeta_id", carpetaActualId);
 
       let resp: Response;
       try {
@@ -258,12 +266,17 @@ export function PanelSubidas() {
         despachar();
       }
     },
-    [actualizar, despachar, procesarEvento],
+    [actualizar, carpetaActualId, despachar, procesarEvento],
   );
 
   useEffect(() => {
     subirArchivoRef.current = subirArchivo;
   }, [subirArchivo]);
+
+  useEffect(() => {
+    inputCarpetaRef.current?.setAttribute("webkitdirectory", "");
+    inputCarpetaRef.current?.setAttribute("directory", "");
+  }, []);
 
   /** Acepta un drop o picker. Valida formato + tamaño + límite, encola. */
   const aceptarArchivos = (lista: File[]) => {
@@ -275,6 +288,9 @@ export function PanelSubidas() {
     for (const f of lista) {
       if (aceptados.length >= MAX_POR_TANDA) {
         descartadosLimite++;
+        continue;
+      }
+      if (esEntradaNoSubible(f)) {
         continue;
       }
       const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
@@ -366,6 +382,27 @@ export function PanelSubidas() {
         <div className="text-mute text-[13px]">
           o haz click para seleccionarlos. Puedes subir varios a la vez.
         </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            inputCarpetaRef.current?.click();
+          }}
+          className="mt-3 inline-flex items-center justify-center rounded-full border border-rule px-3 py-1.5 text-xs font-medium text-ink hover:bg-soft transition-colors"
+        >
+          Subir carpeta
+        </button>
+        <input
+          ref={inputCarpetaRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const lista = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            aceptarArchivos(lista);
+          }}
+        />
         <div className="font-mono text-[10px] text-mute uppercase tracking-[0.08em] mt-3.5">
           PDF · DOCX · TXT · XLSX · CSV · PPTX · HTML · JSON · XML · ZIP · audio WAV/MP3/MPEG/M4A/MP4/AIFF/FLAC · hasta 10 MB · máx {MAX_POR_TANDA} a la vez
         </div>
@@ -399,4 +436,16 @@ export function PanelSubidas() {
       )}
     </div>
   );
+}
+
+function obtenerRutaRelativa(fichero: File) {
+  const ruta = (fichero as File & { webkitRelativePath?: string }).webkitRelativePath;
+  return ruta && ruta !== fichero.name ? ruta : "";
+}
+
+function esEntradaNoSubible(fichero: File) {
+  const nombre = fichero.name.trim();
+  if (!nombre) return true;
+  if (nombre === ".DS_Store" || nombre === "Thumbs.db") return true;
+  return fichero.size === 0 && !nombre.includes(".");
 }

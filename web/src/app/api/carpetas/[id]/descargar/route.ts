@@ -95,16 +95,30 @@ export async function GET(
     .maybeSingle();
   const tieneAccesoCompleto = !!carpeta.org_id || carpeta.user_id === user.id || !!accesoPorFavorito;
 
-  let query = admin
-    .from("Documentos")
-    .select("id, nombre, url, user_id, carpeta_id, confidencialidad")
-    .in("carpeta_id", idsDescendientes);
-  if (!carpeta.org_id) query = query.eq("user_id", carpeta.user_id);
+  let docs: Documento[] = [];
+  if (carpeta.org_id) {
+    const { data: orgDocs } = await admin
+      .from("org_documentos")
+      .select("carpeta_id, Documentos ( id, nombre, url, user_id, confidencialidad )")
+      .eq("org_id", carpeta.org_id)
+      .in("carpeta_id", idsDescendientes);
+    docs = (orgDocs ?? [])
+      .flatMap((item) => {
+        const doc = Array.isArray(item.Documentos) ? item.Documentos[0] : item.Documentos;
+        return doc ? [{ ...doc, carpeta_id: item.carpeta_id }] : [];
+      }) as Documento[];
+  } else {
+    let query = admin
+      .from("Documentos")
+      .select("id, nombre, url, user_id, carpeta_id, confidencialidad")
+      .in("carpeta_id", idsDescendientes)
+      .eq("user_id", carpeta.user_id);
 
-  if (!tieneAccesoCompleto) query = query.eq("confidencialidad", 0);
+    if (!tieneAccesoCompleto) query = query.eq("confidencialidad", 0);
 
-  const { data: docsData } = await query;
-  const docs = (docsData ?? []) as Documento[];
+    const { data: docsData } = await query;
+    docs = (docsData ?? []) as Documento[];
+  }
 
   if (docs.length === 0) {
     return Response.json(

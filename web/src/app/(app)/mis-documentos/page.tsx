@@ -181,7 +181,7 @@ export default async function PaginaMisDocumentos({
         />
       </div>
 
-      <PanelSubidas />
+      <PanelSubidas carpetaActualId={carpetaActualSegura} />
 
       {documentos.length === 0 && carpetas.length === 0 && (
         <div className="rounded-[14px] border border-dashed border-rule bg-paper p-8 text-center">

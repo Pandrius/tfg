@@ -4,7 +4,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
 import { crearClienteAdmin } from "@/lib/supabase/admin";
 import { crearClienteServidor } from "@/lib/supabase/servidor";
-import { aceptarInvitacionOrg, rechazarInvitacionOrg } from "../organizaciones/acciones";
+import { aceptarInvitacionOrg, marcarNotificacionOrgLeida, rechazarInvitacionOrg } from "../organizaciones/acciones";
 import { aceptarAmistad, rechazarAmistad } from "../usuarios/acciones";
 
 type Perfil = {
@@ -22,7 +22,7 @@ export default async function PaginaBuzon() {
   if (!user) redirect("/login");
 
   const admin = crearClienteAdmin();
-  const [{ data: solicitudes }, { data: invitaciones }] = await Promise.all([
+  const [{ data: solicitudes }, { data: invitaciones }, { data: notificaciones }] = await Promise.all([
     admin
       .from("amistades")
       .select("id, solicitante_id, fecha")
@@ -34,6 +34,12 @@ export default async function PaginaBuzon() {
       .select("id, org_id, invitador_id, fecha, organizaciones ( id, nombre )")
       .eq("invitado_id", user.id)
       .eq("estado", "pendiente")
+      .order("fecha", { ascending: false }),
+    admin
+      .from("org_notificaciones")
+      .select("id, mensaje, fecha, organizaciones ( id, nombre )")
+      .eq("user_id", user.id)
+      .eq("leida", false)
       .order("fecha", { ascending: false }),
   ]);
 
@@ -52,7 +58,7 @@ export default async function PaginaBuzon() {
     for (const perfil of perfiles ?? []) perfilesPorId.set(perfil.id, perfil);
   }
 
-  const total = (solicitudes?.length ?? 0) + (invitaciones?.length ?? 0);
+  const total = (solicitudes?.length ?? 0) + (invitaciones?.length ?? 0) + (notificaciones?.length ?? 0);
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8 flex flex-col gap-8">
@@ -162,6 +168,43 @@ export default async function PaginaBuzon() {
                 })
               ) : (
                 <p className="px-5 py-6 text-center text-mute text-sm">No hay invitaciones.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="flex flex-col gap-3">
+            <h2 className="font-display font-medium text-lg tracking-[-0.01em]">
+              Avisos de organizaciones
+            </h2>
+            <div className="rounded-[14px] border border-rule bg-paper overflow-hidden">
+              {notificaciones?.length ? (
+                notificaciones.map((notificacion) => {
+                  const org = Array.isArray(notificacion.organizaciones)
+                    ? notificacion.organizaciones[0]
+                    : notificacion.organizaciones;
+                  return (
+                    <div
+                      key={notificacion.id}
+                      className="flex flex-col items-stretch gap-3 px-4 py-4 sm:flex-row sm:items-center sm:px-5 sm:py-3 border-b border-rule last:border-b-0"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-[13px]">
+                          {notificacion.mensaje}
+                        </p>
+                        <p className="text-mute text-[11px] font-mono">
+                          {org?.nombre ?? "Organizacion"}
+                        </p>
+                      </div>
+                      <form action={marcarNotificacionOrgLeida.bind(null, notificacion.id)}>
+                        <Button type="submit" variant="ghost" size="sm" className="w-full justify-center sm:w-auto">
+                          Entendido
+                        </Button>
+                      </form>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="px-5 py-6 text-center text-mute text-sm">No hay avisos.</p>
               )}
             </div>
           </section>

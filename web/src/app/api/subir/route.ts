@@ -63,6 +63,9 @@ export async function POST(request: NextRequest) {
 
         const formData = await request.formData();
         const archivo = formData.get("archivo") as File | null;
+        const relativePath = String(formData.get("relative_path") ?? "").trim();
+        const carpetaDestinoRaw = String(formData.get("carpeta_id") ?? "").trim();
+        const carpetaDestinoId = carpetaDestinoRaw || null;
 
         if (!archivo) {
           emit({ fase: "error", error: "No se recibió archivo" });
@@ -80,6 +83,27 @@ export async function POST(request: NextRequest) {
         }
 
         emit({ fase: "extrayendo" });
+
+        const admin = crearClienteAdmin();
+        const carpetaDestinoValida = carpetaDestinoId
+          ? await obtenerCarpetaPersonalValida(admin, user.id, carpetaDestinoId)
+          : null;
+        if (carpetaDestinoId && !carpetaDestinoValida) {
+          emit({ fase: "error", error: "Carpeta destino no valida." });
+          return;
+        }
+
+        const { data: existente } = await admin
+          .from("Documentos")
+          .select("id")
+          .eq("user_id", user.id)
+          .eq("nombre", archivo.name)
+          .maybeSingle();
+
+        if (existente) {
+          emit({ fase: "error", error: `Ya tienes un documento llamado "${archivo.name}".` });
+          return;
+        }
 
         let confidencialidad = 1;
         let probabilidad: number | null = null;
@@ -161,7 +185,9 @@ export async function POST(request: NextRequest) {
 
         emit({ fase: "guardando", advertencias });
 
-        const admin = crearClienteAdmin();
+        const carpetaId = relativePath
+          ? await obtenerOCrearCarpetaPersonal(admin, user.id, relativePath, carpetaDestinoId)
+          : carpetaDestinoId;
         const nombreSlug = slugificar(archivo.name) || `archivo.${extension}`;
         const rutaObjeto = `${user.id}/${Date.now()}_${nombreSlug}`;
         const buffer = await archivo.arrayBuffer();
@@ -192,6 +218,7 @@ export async function POST(request: NextRequest) {
             tipo_archivo: tipoArchivo,
             tamano_bytes: archivo.size,
             probabilidad,
+            carpeta_id: carpetaId,
           })
           .select("id, nombre, confidencialidad")
           .single();
@@ -228,4 +255,70 @@ export async function POST(request: NextRequest) {
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+async function obtenerOCrearCarpetaPersonal(
+  admin: ReturnType<typeof crearClienteAdmin>,
+  userId: string,
+  relativePath: string,
+  carpetaBaseId: string | null,
+) {
+  const partes = relativePath
+    .split("/")
+    .slice(0, -1)
+    .map((parte) => parte.trim())
+    .filter(Boolean);
+
+  if (partes.length === 0) return null;
+
+  let parentId: string | null = carpetaBaseId;
+  for (const nombre of partes) {
+    let query = admin
+      .from("carpetas")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("nombre", nombre)
+      .is("org_id", null);
+
+    query = parentId ? query.eq("parent_id", parentId) : query.is("parent_id", null);
+    const { data: existente } = await query.maybeSingle();
+    if (existente?.id) {
+      parentId = existente.id;
+      continue;
+    }
+
+    const { data: nueva, error } = await admin
+      .from("carpetas")
+      .insert({
+        nombre,
+        user_id: userId,
+        org_id: null,
+        parent_id: parentId,
+      })
+      .select("id")
+      .single();
+
+    if (error || !nueva) {
+      throw new Error(error?.message ?? "No se pudo crear la carpeta.");
+    }
+    parentId = nueva.id;
+  }
+
+  return parentId;
+}
+
+async function obtenerCarpetaPersonalValida(
+  admin: ReturnType<typeof crearClienteAdmin>,
+  userId: string,
+  carpetaId: string,
+) {
+  const { data } = await admin
+    .from("carpetas")
+    .select("id")
+    .eq("id", carpetaId)
+    .eq("user_id", userId)
+    .is("org_id", null)
+    .maybeSingle();
+
+  return data?.id ?? null;
 }

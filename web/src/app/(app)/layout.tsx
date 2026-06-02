@@ -24,7 +24,7 @@ export default async function LayoutApp({
     .eq("id", user.id)
     .single();
 
-  const [{ count: solicitudesAmistad }, { count: invitacionesOrg }] = await Promise.all([
+  const [{ count: solicitudesAmistad }, { count: invitacionesOrg }, { count: notificacionesOrg }] = await Promise.all([
     admin
       .from("amistades")
       .select("id", { count: "exact", head: true })
@@ -35,9 +35,14 @@ export default async function LayoutApp({
       .select("id", { count: "exact", head: true })
       .eq("invitado_id", user.id)
       .eq("estado", "pendiente"),
+    admin
+      .from("org_notificaciones")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("leida", false),
   ]);
 
-  const pendientesBuzon = (solicitudesAmistad ?? 0) + (invitacionesOrg ?? 0);
+  const pendientesBuzon = (solicitudesAmistad ?? 0) + (invitacionesOrg ?? 0) + (notificacionesOrg ?? 0);
 
   return (
     <ToastProvider>
