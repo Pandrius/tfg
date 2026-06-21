@@ -24,6 +24,7 @@ const FORMATOS_PERMITIDOS = new Set([
 ]);
 const TAMANO_MAX = 10 * 1024 * 1024;
 const FORMATOS_AUDIO = new Set(["wav", "mp3", "mpeg", "m4a", "mp4", "aiff", "flac"]);
+const SERVICIO_IA_URL_DEFECTO = "https://pandrius-tfg-ia-servicio.hf.space";
 
 /**
  * Convierte el nombre del archivo en un slug seguro para Supabase Storage
@@ -111,7 +112,7 @@ export async function POST(request: NextRequest) {
         let tipoArchivo: string = extension;
         const advertencias: string[] = [];
 
-        const iaUrl = process.env.SERVICIO_IA_URL;
+        const iaUrl = (process.env.SERVICIO_IA_URL ?? SERVICIO_IA_URL_DEFECTO).replace(/\/+$/, "");
         if (iaUrl) {
           emit({ fase: "clasificando" });
           try {
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest) {
             const iaResp = await fetch(`${iaUrl}/procesar`, {
               method: "POST",
               body: iaForm,
-              signal: AbortSignal.timeout(esAudio ? 300_000 : 30_000),
+              signal: AbortSignal.timeout(esAudio ? 300_000 : 180_000),
             });
             if (iaResp.ok) {
               const iaData = await iaResp.json();
@@ -129,6 +130,9 @@ export async function POST(request: NextRequest) {
               probabilidad = iaData.probabilidad ?? null;
               textoExtraido = iaData.texto_extraido ?? null;
               tipoArchivo = iaData.tipo_archivo ?? extension;
+              if (textoExtraido === null) {
+                advertencias.push("El servicio IA no devolvio texto extraido.");
+              }
               if (Array.isArray(iaData.advertencias)) {
                 advertencias.push(
                   ...iaData.advertencias.filter((a: unknown): a is string => typeof a === "string"),
@@ -171,8 +175,6 @@ export async function POST(request: NextRequest) {
               } · fail-safe a confidencial`,
             );
           }
-        } else {
-          emit({ fase: "clasificando" });
         }
 
         if (textoExtraido !== null && textoExtraido.trim().length === 0) {
